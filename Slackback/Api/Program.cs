@@ -4,7 +4,7 @@ using Scalar.AspNetCore;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddNpgsqlSlimDataSource(builder.Configuration.GetConnectionString("Postgres")!);
+builder.Services.AddNpgsqlDataSource(builder.Configuration.GetConnectionString("Postgres")!);
 
 var seaweedFsPublicUrl = builder.Configuration["SeaweedFs:PublicUrl"];
 if (string.IsNullOrEmpty(seaweedFsPublicUrl))
