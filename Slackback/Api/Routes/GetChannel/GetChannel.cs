@@ -47,6 +47,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                 """
                 SELECT
                     m.public_id AS Id,
+                    m.thread_ts AS ThreadTs,
                     m.data->>'text' AS Text,
                     COALESCE(u.data->>'real_name', u.data->>'name', m.data->>'user') AS AuthorName,
                     (m.data->'files')::text AS FilesJson
@@ -60,12 +61,22 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     LIMIT 1
                 ) u ON true
                 WHERE c.public_id = @ChannelId
-                ORDER BY m.public_id
+                ORDER BY COALESCE(m.thread_ts, m.public_id), m.public_id
                 """,
                 new { ChannelId = channelId },
                 cancellationToken: ct
             )
         );
+
+        var messages = messageRows
+            .GroupBy(row => row.ThreadTs ?? row.Id)
+            .Select(group =>
+            {
+                var rows = group.ToList();
+                var replies = rows.Skip(1).Select(row => MapMessage(row, [], seaweedFs.PublicUrl));
+                return MapMessage(rows[0], replies, seaweedFs.PublicUrl);
+            })
+            .ToArray();
 
         await SendAsync(
             new GetChannelResponse
@@ -76,13 +87,13 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     Name = channel.Name,
                     Topic = channel.Topic
                 },
-                Messages = messageRows.Select(row => MapMessage(row, seaweedFs.PublicUrl)).ToArray()
+                Messages = messages
             },
             cancellation: ct
         );
     }
 
-    private static GetChannelResponse.MessageResponse MapMessage(MessageRow row, string seaweedFsPublicUrl)
+    private static GetChannelResponse.MessageResponse MapMessage(MessageRow row, IEnumerable<GetChannelResponse.MessageResponse> replies, string seaweedFsPublicUrl)
     {
         var files = new List<GetChannelResponse.FileResponse>();
 
@@ -118,11 +129,12 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             Id = row.Id,
             Text = row.Text,
             AuthorName = row.AuthorName ?? "Unknown",
-            Files = files.ToArray()
+            Files = files.ToArray(),
+            Replies = replies.ToArray()
         };
     }
 
     private record ChannelRow(string Id, string Name, string? Topic);
 
-    private record MessageRow(string Id, string? Text, string? AuthorName, string? FilesJson);
+    private record MessageRow(string Id, string? ThreadTs, string? Text, string? AuthorName, string? FilesJson);
 }

@@ -16,6 +16,7 @@ public class GetChannelResponse
         public string? Text { get; init; }
         public required string AuthorName { get; init; }
         public required FileResponse[] Files { get; init; }
+        public required MessageResponse[] Replies { get; init; }
     }
 
     public class ChannelResponse
