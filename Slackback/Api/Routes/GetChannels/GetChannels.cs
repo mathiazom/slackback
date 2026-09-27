@@ -1,8 +1,10 @@
+using Dapper;
 using FastEndpoints;
+using Npgsql;
 
 namespace Api.Routes.GetChannels;
 
-public class GetChannels : EndpointWithoutRequest<GetChannelsResponse>
+public class GetChannels(NpgsqlDataSource db) : EndpointWithoutRequest<GetChannelsResponse>
 {
     public override void Configure()
     {
@@ -12,35 +14,23 @@ public class GetChannels : EndpointWithoutRequest<GetChannelsResponse>
 
     public override async Task HandleAsync(CancellationToken ct)
     {
-        // TODO
-        
+        await using var conn = await db.OpenConnectionAsync(ct);
+
+        var channels = await conn.QueryAsync<GetChannelsResponse.ChannelResponse>(
+            new CommandDefinition(
+                """
+                SELECT DISTINCT ON (public_id)
+                    public_id AS Id,
+                    data->>'name' AS Name
+                FROM channel
+                ORDER BY public_id, timestamp DESC
+                """,
+                cancellationToken: ct
+            )
+        );
+
         await SendAsync(
-            new GetChannelsResponse
-            {
-                Channels =
-                [
-                    new GetChannelsResponse.ChannelResponse
-                    {
-                        Id = "UXXXXXX01",
-                        Name = "general"
-                    },
-                    new GetChannelsResponse.ChannelResponse
-                    {
-                        Id = "UXXXXXX02",
-                        Name = "random"
-                    },
-                    new GetChannelsResponse.ChannelResponse
-                    {
-                        Id = "UXXXXXX03",
-                        Name = "happenings"
-                    },
-                    new GetChannelsResponse.ChannelResponse
-                    {
-                        Id = "UXXXXXX04",
-                        Name = "katt"
-                    },
-                ]
-            },
+            new GetChannelsResponse { Channels = channels.ToArray() },
             cancellation: ct
         );
     }
