@@ -48,9 +48,11 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                 """
                 SELECT
                     m.public_id AS Id,
+                    m.data->>'ts' AS Ts,
                     m.thread_ts AS ThreadTs,
                     m.data->>'text' AS Text,
-                    COALESCE(u.data->>'real_name', u.data->>'name', m.data->>'user') AS AuthorName,
+                    COALESCE(u.data->'profile'->>'display_name', u.data->>'real_name', u.data->>'name', m.data->>'user') AS AuthorDisplayName,
+                    COALESCE(u.data->>'real_name', u.data->>'name', m.data->>'user') AS AuthorRealName,
                     (m.data->'files')::text AS FilesJson
                 FROM message m
                 JOIN channel c ON c.id = m.channel_id
@@ -230,13 +232,15 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         {
             Id = row.Id,
             Text = row.Text is not null ? ResolveEmoji(ResolveMentions(row.Text, userNames), emojiFileIds, seaweedFsPublicUrl) : null,
-            AuthorName = row.AuthorName ?? "Unknown",
-            Files = files.ToArray(),
-            Replies = replies.ToArray()
+            AuthorDisplayName = row.AuthorDisplayName ?? "Unknown",
+            AuthorRealName = row.AuthorRealName ?? "Unknown",
+            Timestamp = DateTimeOffset.FromUnixTimeSeconds(long.Parse(row.Ts.Split(".")[0])).ToString("o"),
+            Files = [.. files],
+            Replies = [.. replies]
         };
     }
 
     private record ChannelRow(string Id, string Name, string? Topic);
 
-    private record MessageRow(string Id, string? ThreadTs, string? Text, string? AuthorName, string? FilesJson);
+    private record MessageRow(string Id, string Ts, string? ThreadTs, string? Text, string? AuthorDisplayName,string? AuthorRealName, string? FilesJson);
 }

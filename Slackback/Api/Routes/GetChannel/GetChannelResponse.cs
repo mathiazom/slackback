@@ -14,7 +14,9 @@ public class GetChannelResponse
     {
         public required string Id { get; init; }
         public string? Text { get; init; }
-        public required string AuthorName { get; init; }
+        public required string AuthorDisplayName { get; init; }
+        public required string AuthorRealName { get; init; }
+        public required string Timestamp { get; init; }
         public required FileResponse[] Files { get; init; }
         public required MessageResponse[] Replies { get; init; }
     }
