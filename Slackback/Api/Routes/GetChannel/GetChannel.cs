@@ -64,7 +64,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     LIMIT 1
                 ) u ON true
                 WHERE c.public_id = @ChannelId
-                ORDER BY COALESCE(m.thread_ts, m.public_id), m.public_id
+                ORDER BY COALESCE(m.thread_ts, m.public_id) DESC, m.public_id ASC
                 """,
                 new { ChannelId = channelId },
                 cancellationToken: ct
