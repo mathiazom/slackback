@@ -106,7 +106,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             : (await conn.QueryAsync<UserNamesRow>(
                 new CommandDefinition(
                     // Same name fallbacks as message authors: mentions use the
-                    // real name, reactors the display name (with real name).
+                    // display name, reactors the display name (with real name).
                     """
                     SELECT DISTINCT ON (public_id)
                         public_id AS Id,
@@ -120,6 +120,30 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     cancellationToken: ct
                 )
             )).ToDictionary(row => row.Id);
+
+        // Same batching as user mentions. Only channels we've archived resolve,
+        // which is also what decides whether slackopy can link to them.
+        var mentionedChannelIds = allTexts
+            .SelectMany(text => ChannelMentionRegex.Matches(text).Select(m => m.Groups[1].Value))
+            .Distinct()
+            .ToArray();
+
+        var channelNames = mentionedChannelIds.Length == 0
+            ? new Dictionary<string, string>()
+            : (await conn.QueryAsync<(string Id, string Name)>(
+                new CommandDefinition(
+                    """
+                    SELECT DISTINCT ON (public_id)
+                        public_id AS Id,
+                        data->>'name' AS Name
+                    FROM channel
+                    WHERE public_id = ANY(@ChannelIds)
+                    ORDER BY public_id, timestamp DESC
+                    """,
+                    new { ChannelIds = mentionedChannelIds },
+                    cancellationToken: ct
+                )
+            )).ToDictionary(row => row.Id, row => row.Name);
 
         // Same batching approach as mentions: only custom (workspace) emoji need
         // resolving here - standard emoji are already real Unicode characters in
@@ -152,8 +176,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             .Select(group =>
             {
                 var rows = group.ToList();
-                var replies = rows.Skip(1).Select(row => MapMessage(row, reactionsByMessageId[row.Id], [], userNames, emojiFileIds, seaweedFs.PublicUrl));
-                return MapMessage(rows[0], reactionsByMessageId[rows[0].Id], replies, userNames, emojiFileIds, seaweedFs.PublicUrl);
+                var replies = rows.Skip(1).Select(row => MapMessage(row, reactionsByMessageId[row.Id], [], userNames, channelNames, emojiFileIds, seaweedFs.PublicUrl));
+                return MapMessage(rows[0], reactionsByMessageId[rows[0].Id], replies, userNames, channelNames, emojiFileIds, seaweedFs.PublicUrl);
             })
             .ToArray();
 
@@ -165,7 +189,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     Id = channel.Id,
                     Name = channel.Name,
                     Topic = channel.Topic is not null
-                        ? ResolveEmoji(ResolveMentions(channel.Topic, userNames), emojiFileIds, seaweedFs.PublicUrl)
+                        ? ResolveMentions(ResolveEmoji(channel.Topic, emojiFileIds, seaweedFs.PublicUrl), userNames, channelNames)
                         : null
                 },
                 Messages = messages
@@ -174,29 +198,49 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         );
     }
 
-    // Slack's own U/W-prefixed user ids; the optional |label is a fallback name
-    // Slack sometimes inlines, which takes priority over a DB lookup when present.
+    // Slack's own U/W-prefixed user ids; the optional |label is a name Slack
+    // sometimes inlines, only used when the user isn't in the DB.
     private static readonly Regex UserMentionRegex = new(@"<@([UW][A-Z0-9]+)(?:\|([^>]*))?>", RegexOptions.Compiled);
-    // Channel mentions always carry their display name inline, so no DB lookup needed.
-    private static readonly Regex ChannelMentionRegex = new(@"<#[A-Z0-9]+\|([^>]*)>", RegexOptions.Compiled);
-    private static readonly Regex SpecialMentionRegex = new(@"<!(here|channel|everyone)>", RegexOptions.Compiled);
+    // Slack doesn't always inline the channel name (e.g. "<#C028FFPT9K3>"), and
+    // when it does it's the name at posting time, not the current one.
+    private static readonly Regex ChannelMentionRegex = new(@"<#([CG][A-Z0-9]+)(?:\|([^>]*))?>", RegexOptions.Compiled);
     // Slack shortcode names: lowercase letters, digits, underscore, hyphen, plus.
     private static readonly Regex EmojiShortcodeRegex = new(@":([a-z0-9_+-]+):", RegexOptions.Compiled);
 
-    private static string ResolveMentions(string text, IReadOnlyDictionary<string, UserNamesRow> userNames)
+    // Mentions stay in Slack's own <@id|name>/<#id|name> syntax, just with the
+    // name filled in, so slackopy can style them - like emoji, slackback never
+    // emits HTML. @here/@channel/@everyone need no lookup and pass through as-is.
+    // A channel we haven't archived becomes plain "#name" text instead, since
+    // slackopy links every <#id|name> and there'd be nothing to link to.
+    // Runs after emoji resolution so a ":word:" inside a looked-up name can't be
+    // turned into an emoji token nested inside the mention token.
+    private static string ResolveMentions(string text, IReadOnlyDictionary<string, UserNamesRow> userNames, IReadOnlyDictionary<string, string> channelNames)
     {
         text = UserMentionRegex.Replace(text, match =>
         {
-            var inlineName = match.Groups[2].Success ? match.Groups[2].Value : null;
+            var inlineName = match.Groups[2].Success && match.Groups[2].Value != "" ? match.Groups[2].Value : null;
             var userId = match.Groups[1].Value;
-            var name = inlineName ?? (userNames.TryGetValue(userId, out var resolved) ? resolved.RealName : userId);
-            return $"@{name}";
+            // Display name, so a mention reads the same as that user's messages.
+            var name = userNames.TryGetValue(userId, out var resolved) ? EscapeSlackText(resolved.DisplayName) : inlineName ?? userId;
+            return $"<@{userId}|{name}>";
         });
 
-        text = ChannelMentionRegex.Replace(text, match => $"#{match.Groups[1].Value}");
-
-        return SpecialMentionRegex.Replace(text, match => $"@{match.Groups[1].Value}");
+        return ChannelMentionRegex.Replace(text, match =>
+        {
+            var channelId = match.Groups[1].Value;
+            if (channelNames.TryGetValue(channelId, out var name))
+            {
+                return $"<#{channelId}|{EscapeSlackText(name)}>";
+            }
+            var inlineName = match.Groups[2].Success && match.Groups[2].Value != "" ? match.Groups[2].Value : channelId;
+            return $"#{inlineName}";
+        });
     }
+
+    // Names from the DB are raw, unlike inline labels, which Slack has already
+    // escaped. Without this a ">" in a real name would end the mention token early.
+    private static string EscapeSlackText(string text) =>
+        text.Replace("&", "&amp;").Replace("<", "&lt;").Replace(">", "&gt;");
 
     // Emoji resolve to a dedicated <emoji:url|name> token (not a real <img> tag -
     // slackback never emits HTML) that slackopy's own renderer recognizes and
@@ -220,7 +264,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
     // the full name is kept for slackopy's standard-emoji lookup.
     private static string ReactionBaseName(string name) => name.Split("::")[0];
 
-    private static GetChannelResponse.MessageResponse MapMessage(MessageRow row, ReactionData[] reactions, IEnumerable<GetChannelResponse.MessageResponse> replies, IReadOnlyDictionary<string, UserNamesRow> userNames, IReadOnlyDictionary<string, string> emojiFileIds, string seaweedFsPublicUrl)
+    private static GetChannelResponse.MessageResponse MapMessage(MessageRow row, ReactionData[] reactions, IEnumerable<GetChannelResponse.MessageResponse> replies, IReadOnlyDictionary<string, UserNamesRow> userNames, IReadOnlyDictionary<string, string> channelNames, IReadOnlyDictionary<string, string> emojiFileIds, string seaweedFsPublicUrl)
     {
         var files = new List<GetChannelResponse.FileResponse>();
 
@@ -254,7 +298,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         return new GetChannelResponse.MessageResponse
         {
             Id = row.Id,
-            Text = row.Text is not null ? ResolveEmoji(ResolveMentions(row.Text, userNames), emojiFileIds, seaweedFsPublicUrl) : null,
+            Text = row.Text is not null ? ResolveMentions(ResolveEmoji(row.Text, emojiFileIds, seaweedFsPublicUrl), userNames, channelNames) : null,
             AuthorDisplayName = row.AuthorDisplayName ?? "Unknown",
             AuthorRealName = row.AuthorRealName ?? "Unknown",
             Timestamp = DateTimeOffset.FromUnixTimeSeconds(long.Parse(row.Ts.Split(".")[0])).ToString("o"),
