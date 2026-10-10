@@ -10,6 +10,20 @@ public class GetChannelResponse
         public required string Url { get; init; }
     }
 
+    public class ReactionUserResponse
+    {
+        public required string DisplayName { get; init; }
+        public required string RealName { get; init; }
+    }
+
+    public class ReactionResponse
+    {
+        public required string Name { get; init; }
+        public string? ImageUrl { get; init; }
+        public required int Count { get; init; }
+        public required ReactionUserResponse[] Users { get; init; }
+    }
+
     public class MessageResponse
     {
         public required string Id { get; init; }
@@ -18,6 +32,7 @@ public class GetChannelResponse
         public required string AuthorRealName { get; init; }
         public required string Timestamp { get; init; }
         public required FileResponse[] Files { get; init; }
+        public required ReactionResponse[] Reactions { get; init; }
         public required MessageResponse[] Replies { get; init; }
     }
 

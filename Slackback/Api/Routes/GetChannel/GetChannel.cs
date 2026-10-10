@@ -53,7 +53,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     m.data->>'text' AS Text,
                     COALESCE(u.data->'profile'->>'display_name', u.data->>'real_name', u.data->>'name', m.data->>'user') AS AuthorDisplayName,
                     COALESCE(u.data->>'real_name', u.data->>'name', m.data->>'user') AS AuthorRealName,
-                    (m.data->'files')::text AS FilesJson
+                    (m.data->'files')::text AS FilesJson,
+                    (m.data->'reactions')::text AS ReactionsJson
                 FROM message m
                 JOIN channel c ON c.id = m.channel_id
                 LEFT JOIN LATERAL (
@@ -81,22 +82,36 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             .Select(text => text!)
             .ToArray();
 
+        // Parsed once up front so reactors and reaction emoji can join the same
+        // batched user/emoji lookups as mentions in text.
+        var reactionsByMessageId = messageRows.ToDictionary(
+            row => row.Id,
+            row => row.ReactionsJson is not null
+                ? JsonSerializer.Deserialize<ReactionData[]>(row.ReactionsJson, ReactionJsonOptions) ?? []
+                : []
+        );
+        var allReactions = reactionsByMessageId.Values.SelectMany(reactions => reactions).ToArray();
+
         // Batched instead of resolved per-message: collect every mentioned user id
         // across all messages/replies up front, then one query for all of them,
         // rather than a lookup per mention occurrence.
         var mentionedUserIds = allTexts
             .SelectMany(text => UserMentionRegex.Matches(text).Select(m => m.Groups[1].Value))
+            .Concat(allReactions.SelectMany(reaction => reaction.Users ?? []))
             .Distinct()
             .ToArray();
 
         var userNames = mentionedUserIds.Length == 0
-            ? new Dictionary<string, string>()
-            : (await conn.QueryAsync<(string Id, string Name)>(
+            ? new Dictionary<string, UserNamesRow>()
+            : (await conn.QueryAsync<UserNamesRow>(
                 new CommandDefinition(
+                    // Same name fallbacks as message authors: mentions use the
+                    // real name, reactors the display name (with real name).
                     """
                     SELECT DISTINCT ON (public_id)
                         public_id AS Id,
-                        COALESCE(data->>'real_name', data->>'name') AS Name
+                        COALESCE(data->'profile'->>'display_name', data->>'real_name', data->>'name') AS DisplayName,
+                        COALESCE(data->>'real_name', data->>'name') AS RealName
                     FROM "user"
                     WHERE public_id = ANY(@UserIds)
                     ORDER BY public_id, timestamp DESC
@@ -104,13 +119,14 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     new { UserIds = mentionedUserIds },
                     cancellationToken: ct
                 )
-            )).ToDictionary(row => row.Id, row => row.Name);
+            )).ToDictionary(row => row.Id);
 
         // Same batching approach as mentions: only custom (workspace) emoji need
         // resolving here - standard emoji are already real Unicode characters in
         // Slack's stored text, not shortcodes, so they need no handling at all.
         var mentionedEmojiNames = allTexts
             .SelectMany(text => EmojiShortcodeRegex.Matches(text).Select(m => m.Groups[1].Value))
+            .Concat(allReactions.Select(reaction => ReactionBaseName(reaction.Name)))
             .Distinct()
             .ToArray();
 
@@ -136,8 +152,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             .Select(group =>
             {
                 var rows = group.ToList();
-                var replies = rows.Skip(1).Select(row => MapMessage(row, [], userNames, emojiFileIds, seaweedFs.PublicUrl));
-                return MapMessage(rows[0], replies, userNames, emojiFileIds, seaweedFs.PublicUrl);
+                var replies = rows.Skip(1).Select(row => MapMessage(row, reactionsByMessageId[row.Id], [], userNames, emojiFileIds, seaweedFs.PublicUrl));
+                return MapMessage(rows[0], reactionsByMessageId[rows[0].Id], replies, userNames, emojiFileIds, seaweedFs.PublicUrl);
             })
             .ToArray();
 
@@ -167,13 +183,13 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
     // Slack shortcode names: lowercase letters, digits, underscore, hyphen, plus.
     private static readonly Regex EmojiShortcodeRegex = new(@":([a-z0-9_+-]+):", RegexOptions.Compiled);
 
-    private static string ResolveMentions(string text, IReadOnlyDictionary<string, string> userNames)
+    private static string ResolveMentions(string text, IReadOnlyDictionary<string, UserNamesRow> userNames)
     {
         text = UserMentionRegex.Replace(text, match =>
         {
             var inlineName = match.Groups[2].Success ? match.Groups[2].Value : null;
             var userId = match.Groups[1].Value;
-            var name = inlineName ?? (userNames.TryGetValue(userId, out var resolved) ? resolved : userId);
+            var name = inlineName ?? (userNames.TryGetValue(userId, out var resolved) ? resolved.RealName : userId);
             return $"@{name}";
         });
 
@@ -197,7 +213,14 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         });
     }
 
-    private static GetChannelResponse.MessageResponse MapMessage(MessageRow row, IEnumerable<GetChannelResponse.MessageResponse> replies, IReadOnlyDictionary<string, string> userNames, IReadOnlyDictionary<string, string> emojiFileIds, string seaweedFsPublicUrl)
+    private static readonly JsonSerializerOptions ReactionJsonOptions = new() { PropertyNameCaseInsensitive = true };
+
+    // Skin-toned reactions are stored as e.g. "+1::skin-tone-3". Custom emoji
+    // never carry a tone, so only the base name is looked up in the emoji table;
+    // the full name is kept for slackopy's standard-emoji lookup.
+    private static string ReactionBaseName(string name) => name.Split("::")[0];
+
+    private static GetChannelResponse.MessageResponse MapMessage(MessageRow row, ReactionData[] reactions, IEnumerable<GetChannelResponse.MessageResponse> replies, IReadOnlyDictionary<string, UserNamesRow> userNames, IReadOnlyDictionary<string, string> emojiFileIds, string seaweedFsPublicUrl)
     {
         var files = new List<GetChannelResponse.FileResponse>();
 
@@ -236,11 +259,28 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             AuthorRealName = row.AuthorRealName ?? "Unknown",
             Timestamp = DateTimeOffset.FromUnixTimeSeconds(long.Parse(row.Ts.Split(".")[0])).ToString("o"),
             Files = [.. files],
+            Reactions = [.. reactions.Select(reaction => new GetChannelResponse.ReactionResponse
+            {
+                Name = reaction.Name,
+                ImageUrl = emojiFileIds.TryGetValue(ReactionBaseName(reaction.Name), out var fileId)
+                    ? $"{seaweedFsPublicUrl}/{fileId}"
+                    : null,
+                Count = reaction.Count,
+                Users = [.. (reaction.Users ?? []).Select(userId => userNames.TryGetValue(userId, out var names)
+                    ? new GetChannelResponse.ReactionUserResponse { DisplayName = names.DisplayName, RealName = names.RealName }
+                    : new GetChannelResponse.ReactionUserResponse { DisplayName = userId, RealName = userId })]
+            })],
             Replies = [.. replies]
         };
     }
 
     private record ChannelRow(string Id, string Name, string? Topic);
 
-    private record MessageRow(string Id, string Ts, string? ThreadTs, string? Text, string? AuthorDisplayName,string? AuthorRealName, string? FilesJson);
+    private record UserNamesRow(string Id, string DisplayName, string RealName);
+
+    private record MessageRow(string Id, string Ts, string? ThreadTs, string? Text, string? AuthorDisplayName,string? AuthorRealName, string? FilesJson, string? ReactionsJson);
+
+    // Slack's own reaction shape. Count is authoritative: Slack can truncate the
+    // users list on heavily-reacted messages.
+    private record ReactionData(string Name, int Count, string[]? Users);
 }
