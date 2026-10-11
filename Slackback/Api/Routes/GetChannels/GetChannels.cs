@@ -19,8 +19,12 @@ public class GetChannels(NpgsqlDataSource db) : EndpointWithoutRequest<GetChanne
         var channels = await conn.QueryAsync<GetChannelsResponse.ChannelResponse>(
             new CommandDefinition(
                 """
-                SELECT public_id AS Id, data->>'name' AS Name
-                FROM channel
+                SELECT Id, Name
+                FROM (
+                    SELECT DISTINCT ON (public_id) public_id AS Id, data->>'name' AS Name
+                    FROM channel
+                    ORDER BY public_id, timestamp DESC
+                ) latest
                 ORDER BY Name
                 """,
                 cancellationToken: ct
