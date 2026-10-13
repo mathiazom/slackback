@@ -8,6 +8,10 @@ public class GetChannelResponse
         public string? Name { get; init; }
         public string? Mimetype { get; init; }
         public required string Url { get; init; }
+        // Original image dimensions from Slack, null when unknown (non-images,
+        // or Slack didn't say). Lets slackopy reserve space before loading.
+        public int? Width { get; init; }
+        public int? Height { get; init; }
     }
 
     public class ReactionUserResponse

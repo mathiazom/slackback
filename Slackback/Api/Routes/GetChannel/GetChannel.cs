@@ -269,6 +269,12 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         });
     }
 
+    // Slack stores unknown dimensions as 0.
+    private static int? PositiveInt(JsonElement element, string property) =>
+        element.TryGetProperty(property, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var value) && value > 0
+            ? value
+            : null;
+
     private static readonly JsonSerializerOptions ReactionJsonOptions = new() { PropertyNameCaseInsensitive = true };
 
     // Skin-toned reactions are stored as e.g. "+1::skin-tone-3". Custom emoji
@@ -302,7 +308,9 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     Id = file.TryGetProperty("id", out var idProp) ? idProp.GetString() ?? archivedFileId : archivedFileId,
                     Name = file.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null,
                     Mimetype = file.TryGetProperty("mimetype", out var mimetypeProp) ? mimetypeProp.GetString() : null,
-                    Url = $"{seaweedFsPublicUrl}/{archivedFileId}"
+                    Url = $"{seaweedFsPublicUrl}/{archivedFileId}",
+                    Width = PositiveInt(file, "original_w"),
+                    Height = PositiveInt(file, "original_h")
                 });
             }
         }
