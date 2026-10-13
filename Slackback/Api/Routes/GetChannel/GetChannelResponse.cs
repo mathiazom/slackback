@@ -30,6 +30,13 @@ public class GetChannelResponse
         public string? Text { get; init; }
         public required string AuthorDisplayName { get; init; }
         public required string AuthorRealName { get; init; }
+        // Slack user id, null for bot/system messages.
+        public string? AuthorId { get; init; }
+        // The author's user snapshot as of this message; null before their first
+        // snapshot. Lets slackopy tell when an author's identity changed.
+        public int? AuthorSnapshotId { get; init; }
+        public string? AuthorAvatarUrl { get; init; }
+        public string? AuthorAvatarLargeUrl { get; init; }
         public required string Timestamp { get; init; }
         public required FileResponse[] Files { get; init; }
         public required ReactionResponse[] Reactions { get; init; }
