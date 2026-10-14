@@ -344,11 +344,15 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
 
     // The user snapshot valid at a Slack ts (latest snapshot taken at or before it),
     // for use inside a LATERAL join. Before a user's first snapshot (pre-archive
-    // history) names fall back to the earliest snapshot, but the avatar stays null
-    // since we have no record of what they looked like then. snapshot_id is null
-    // in that case too, so "same identity" comparisons treat all pre-history alike.
+    // history) names fall back to the earliest snapshot. snapshot_id is null in that
+    // case too, so "same identity" comparisons treat all pre-history alike.
     // Snapshot timestamps are naive pack-time CURRENT_TIMESTAMPs, so the ts is
     // converted the same way (session time zone) before comparing.
+    // The avatar resolves separately, from the latest snapshot whose avatar was
+    // already current at the ts (slackpack's archived_avatar_since, usually earlier
+    // than the snapshot itself), so it can change ahead of the names and reach into
+    // pre-archive history. Before any of them it stays null, since we have no
+    // record of what they looked like then.
     private static string UserAsOfSql(string userIdSql, string tsSql) =>
         $"""
         SELECT
@@ -356,8 +360,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             COALESCE(as_of.data, earliest.data)->'profile'->>'display_name' AS display_name,
             COALESCE(as_of.data, earliest.data)->>'real_name' AS real_name,
             COALESCE(as_of.data, earliest.data)->>'name' AS name,
-            as_of.data->'profile'->>'archived_avatar_72_id' AS avatar_72_id,
-            as_of.data->'profile'->>'archived_avatar_512_id' AS avatar_512_id
+            avatar.data->'profile'->>'archived_avatar_72_id' AS avatar_72_id,
+            avatar.data->'profile'->>'archived_avatar_512_id' AS avatar_512_id
         FROM (SELECT 1) one
         LEFT JOIN LATERAL (
             SELECT id, data
@@ -375,6 +379,14 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             ORDER BY timestamp ASC
             LIMIT 1
         ) earliest ON true
+        LEFT JOIN LATERAL (
+            SELECT data
+            FROM "user"
+            WHERE public_id = {userIdSql}
+              AND (data->'profile'->>'archived_avatar_since')::bigint <= ({tsSql})::double precision
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ) avatar ON true
         WHERE as_of.id IS NOT NULL OR earliest.data IS NOT NULL
         """;
 
