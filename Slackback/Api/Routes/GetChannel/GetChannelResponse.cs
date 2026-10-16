@@ -17,13 +17,16 @@ public class GetChannelResponse
     {
         // "image", "video" or "audio".
         public required string Kind { get; init; }
-        // The original when browsers can play/display it, else the converted copy
-        // slackpack made (e.g. JPEG for HEIC).
+        // For images, Slack's thumbnail when the image is large enough to have one.
+        // Otherwise the original when browsers can play/display it, else the
+        // converted copy slackpack made (e.g. JPEG for HEIC).
         public required string Url { get; init; }
         // Dimensions of Url's image or video, null when unknown (always for
         // audio). Lets slackopy reserve space before loading.
         public int? Width { get; init; }
         public int? Height { get; init; }
+        // For video, a still frame to show before it plays, null when there's none.
+        public string? PosterUrl { get; init; }
     }
 
     public class ReactionUserResponse

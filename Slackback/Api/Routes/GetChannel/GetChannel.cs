@@ -290,6 +290,18 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
 
     private static GetChannelResponse.EmbedResponse? MapEmbed(JsonElement file, string? mimetype, string url, string seaweedFsPublicUrl)
     {
+        // slackpack archives Slack's thumbnail of large images, so they load fast.
+        var thumbFileId = file.TryGetProperty("archived_thumb_file_id", out var thumbFileIdProp) ? thumbFileIdProp.GetString() : null;
+        if (!string.IsNullOrEmpty(thumbFileId))
+        {
+            return new GetChannelResponse.EmbedResponse
+            {
+                Kind = "image",
+                Url = $"{seaweedFsPublicUrl}/{thumbFileId}",
+                Width = PositiveInt(file, "archived_thumb_w"),
+                Height = PositiveInt(file, "archived_thumb_h")
+            };
+        }
         var convertedFileId = file.TryGetProperty("archived_converted_file_id", out var convertedFileIdProp) ? convertedFileIdProp.GetString() : null;
         if (!string.IsNullOrEmpty(convertedFileId))
         {
@@ -318,12 +330,14 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         if (BrowserVideoMimetypes.Contains(mimetype))
         {
             // Slack gives no video dimensions; slackpack probes them.
+            var posterFileId = file.TryGetProperty("archived_poster_file_id", out var posterFileIdProp) ? posterFileIdProp.GetString() : null;
             return new GetChannelResponse.EmbedResponse
             {
                 Kind = "video",
                 Url = url,
                 Width = PositiveInt(file, "archived_video_w"),
-                Height = PositiveInt(file, "archived_video_h")
+                Height = PositiveInt(file, "archived_video_h"),
+                PosterUrl = !string.IsNullOrEmpty(posterFileId) ? $"{seaweedFsPublicUrl}/{posterFileId}" : null
             };
         }
         if (BrowserAudioMimetypes.Contains(mimetype))
