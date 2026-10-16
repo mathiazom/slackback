@@ -7,9 +7,14 @@ public class GetChannelResponse
         public required string Id { get; init; }
         public string? Name { get; init; }
         public string? Mimetype { get; init; }
+        // The archived original, as uploaded.
         public required string Url { get; init; }
-        // Original image dimensions from Slack, null when unknown (non-images,
-        // or Slack didn't say). Lets slackopy reserve space before loading.
+        // What to show inline: the original when browsers can display it, else
+        // the converted copy slackpack made (e.g. JPEG for HEIC), null when
+        // there's neither (the file is then only linked).
+        public string? ImageUrl { get; init; }
+        // Dimensions of ImageUrl's image, null when unknown (no image, or Slack
+        // didn't say). Lets slackopy reserve space before loading.
         public int? Width { get; init; }
         public int? Height { get; init; }
     }

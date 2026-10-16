@@ -270,6 +270,13 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
     }
 
     // Slack stores unknown dimensions as 0.
+    // Image types every major browser displays inline. Others (HEIC, TIFF, ...)
+    // only show inline through a converted copy.
+    private static readonly HashSet<string> BrowserImageMimetypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "image/jpeg", "image/png", "image/gif", "image/webp", "image/avif", "image/bmp", "image/svg+xml"
+    };
+
     private static int? PositiveInt(JsonElement element, string property) =>
         element.TryGetProperty(property, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var value) && value > 0
             ? value
@@ -303,14 +310,24 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     continue;
                 }
 
+                var mimetype = file.TryGetProperty("mimetype", out var mimetypeProp) ? mimetypeProp.GetString() : null;
+                var url = $"{seaweedFsPublicUrl}/{archivedFileId}";
+                var convertedFileId = file.TryGetProperty("archived_converted_file_id", out var convertedFileIdProp) ? convertedFileIdProp.GetString() : null;
+                var (imageUrl, width, height) = !string.IsNullOrEmpty(convertedFileId)
+                    ? ($"{seaweedFsPublicUrl}/{convertedFileId}", PositiveInt(file, "archived_converted_w"), PositiveInt(file, "archived_converted_h"))
+                    : mimetype is not null && BrowserImageMimetypes.Contains(mimetype)
+                        ? (url, PositiveInt(file, "original_w"), PositiveInt(file, "original_h"))
+                        : (null, null, null);
+
                 files.Add(new GetChannelResponse.FileResponse
                 {
                     Id = file.TryGetProperty("id", out var idProp) ? idProp.GetString() ?? archivedFileId : archivedFileId,
                     Name = file.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null,
-                    Mimetype = file.TryGetProperty("mimetype", out var mimetypeProp) ? mimetypeProp.GetString() : null,
-                    Url = $"{seaweedFsPublicUrl}/{archivedFileId}",
-                    Width = PositiveInt(file, "original_w"),
-                    Height = PositiveInt(file, "original_h")
+                    Mimetype = mimetype,
+                    Url = url,
+                    ImageUrl = imageUrl,
+                    Width = width,
+                    Height = height
                 });
             }
         }
