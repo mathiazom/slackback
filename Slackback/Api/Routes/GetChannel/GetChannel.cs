@@ -269,7 +269,6 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         });
     }
 
-    // Slack stores unknown dimensions as 0.
     // Image types every major browser displays inline. Others (HEIC, TIFF, ...)
     // only show inline through a converted copy.
     private static readonly HashSet<string> BrowserImageMimetypes = new(StringComparer.OrdinalIgnoreCase)
@@ -277,6 +276,64 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         "image/jpeg", "image/png", "image/gif", "image/webp", "image/avif", "image/bmp", "image/svg+xml"
     };
 
+    // Video containers browsers play; whether they can decode the codec (HEVC
+    // isn't everywhere) only the browser knows, so slackopy always links the file too.
+    private static readonly HashSet<string> BrowserVideoMimetypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "video/mp4", "video/quicktime", "video/webm"
+    };
+
+    private static readonly HashSet<string> BrowserAudioMimetypes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "audio/mpeg", "audio/mp4", "audio/x-m4a", "audio/aac", "audio/wav", "audio/x-wav", "audio/ogg", "audio/webm", "audio/flac"
+    };
+
+    private static GetChannelResponse.EmbedResponse? MapEmbed(JsonElement file, string? mimetype, string url, string seaweedFsPublicUrl)
+    {
+        var convertedFileId = file.TryGetProperty("archived_converted_file_id", out var convertedFileIdProp) ? convertedFileIdProp.GetString() : null;
+        if (!string.IsNullOrEmpty(convertedFileId))
+        {
+            return new GetChannelResponse.EmbedResponse
+            {
+                Kind = "image",
+                Url = $"{seaweedFsPublicUrl}/{convertedFileId}",
+                Width = PositiveInt(file, "archived_converted_w"),
+                Height = PositiveInt(file, "archived_converted_h")
+            };
+        }
+        if (mimetype is null)
+        {
+            return null;
+        }
+        if (BrowserImageMimetypes.Contains(mimetype))
+        {
+            return new GetChannelResponse.EmbedResponse
+            {
+                Kind = "image",
+                Url = url,
+                Width = PositiveInt(file, "original_w"),
+                Height = PositiveInt(file, "original_h")
+            };
+        }
+        if (BrowserVideoMimetypes.Contains(mimetype))
+        {
+            // Slack gives no video dimensions; slackpack probes them.
+            return new GetChannelResponse.EmbedResponse
+            {
+                Kind = "video",
+                Url = url,
+                Width = PositiveInt(file, "archived_video_w"),
+                Height = PositiveInt(file, "archived_video_h")
+            };
+        }
+        if (BrowserAudioMimetypes.Contains(mimetype))
+        {
+            return new GetChannelResponse.EmbedResponse { Kind = "audio", Url = url };
+        }
+        return null;
+    }
+
+    // Slack stores unknown dimensions as 0.
     private static int? PositiveInt(JsonElement element, string property) =>
         element.TryGetProperty(property, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var value) && value > 0
             ? value
@@ -312,12 +369,6 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
 
                 var mimetype = file.TryGetProperty("mimetype", out var mimetypeProp) ? mimetypeProp.GetString() : null;
                 var url = $"{seaweedFsPublicUrl}/{archivedFileId}";
-                var convertedFileId = file.TryGetProperty("archived_converted_file_id", out var convertedFileIdProp) ? convertedFileIdProp.GetString() : null;
-                var (imageUrl, width, height) = !string.IsNullOrEmpty(convertedFileId)
-                    ? ($"{seaweedFsPublicUrl}/{convertedFileId}", PositiveInt(file, "archived_converted_w"), PositiveInt(file, "archived_converted_h"))
-                    : mimetype is not null && BrowserImageMimetypes.Contains(mimetype)
-                        ? (url, PositiveInt(file, "original_w"), PositiveInt(file, "original_h"))
-                        : (null, null, null);
 
                 files.Add(new GetChannelResponse.FileResponse
                 {
@@ -325,9 +376,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     Name = file.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null,
                     Mimetype = mimetype,
                     Url = url,
-                    ImageUrl = imageUrl,
-                    Width = width,
-                    Height = height
+                    Embed = MapEmbed(file, mimetype, url, seaweedFsPublicUrl)
                 });
             }
         }

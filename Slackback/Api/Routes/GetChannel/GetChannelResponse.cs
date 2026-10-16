@@ -9,12 +9,19 @@ public class GetChannelResponse
         public string? Mimetype { get; init; }
         // The archived original, as uploaded.
         public required string Url { get; init; }
-        // What to show inline: the original when browsers can display it, else
-        // the converted copy slackpack made (e.g. JPEG for HEIC), null when
-        // there's neither (the file is then only linked).
-        public string? ImageUrl { get; init; }
-        // Dimensions of ImageUrl's image, null when unknown (no image, or Slack
-        // didn't say). Lets slackopy reserve space before loading.
+        // How to show the file inline, null when it's only linked.
+        public EmbedResponse? Embed { get; init; }
+    }
+
+    public class EmbedResponse
+    {
+        // "image", "video" or "audio".
+        public required string Kind { get; init; }
+        // The original when browsers can play/display it, else the converted copy
+        // slackpack made (e.g. JPEG for HEIC).
+        public required string Url { get; init; }
+        // Dimensions of Url's image or video, null when unknown (always for
+        // audio). Lets slackopy reserve space before loading.
         public int? Width { get; init; }
         public int? Height { get; init; }
     }
