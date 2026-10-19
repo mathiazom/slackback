@@ -26,7 +26,12 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                 SELECT
                     public_id AS Id,
                     data->>'name' AS Name,
-                    data->'topic'->>'value' AS Topic
+                    NULLIF(data->'topic'->>'value', '') AS Topic,
+                    NULLIF(data->'purpose'->>'value', '') AS Purpose,
+                    (data->>'created')::bigint AS Created,
+                    NULLIF(data->>'creator', '') AS CreatorId,
+                    COALESCE((data->>'is_archived')::boolean, false) AS IsArchived,
+                    (data->'previous_names')::text AS PreviousNamesJson
                 FROM channel
                 WHERE public_id = @ChannelId
                 ORDER BY timestamp DESC
@@ -42,6 +47,31 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             await SendNotFoundAsync(ct);
             return;
         }
+
+        // Slack keeps no archive time on the channel itself, only the system
+        // message posted when it happens. A later unarchive means the channel was
+        // archived again without one, so then the time is unknown.
+        var archiveEvent = channel.IsArchived
+            ? await conn.QuerySingleOrDefaultAsync<ArchiveEventRow>(
+                new CommandDefinition(
+                    """
+                    SELECT
+                        m.data->>'subtype' AS Subtype,
+                        m.data->>'ts' AS Ts,
+                        NULLIF(m.data->>'user', '') AS UserId
+                    FROM message m
+                    JOIN channel c ON c.id = m.channel_id
+                    WHERE c.public_id = @ChannelId
+                      AND m.data->>'subtype' IN ('channel_archive', 'channel_unarchive')
+                    ORDER BY (m.data->>'ts')::numeric DESC
+                    LIMIT 1
+                    """,
+                    new { ChannelId = channelId },
+                    cancellationToken: ct
+                )
+            )
+            : null;
+        var archived = archiveEvent?.Subtype == "channel_archive" ? archiveEvent : null;
 
         var messageRows = await conn.QueryAsync<MessageRow>(
             new CommandDefinition(
@@ -79,6 +109,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         var allTexts = messageRows
             .Select(row => row.Text)
             .Append(channel.Topic)
+            .Append(channel.Purpose)
             .Where(text => text is not null)
             .Select(text => text!)
             .ToArray();
@@ -93,8 +124,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         );
         var allReactions = reactionsByMessageId.Values.SelectMany(reactions => reactions).ToArray();
 
-        // The topic belongs to the latest channel snapshot, so its mentions
-        // resolve as of now rather than any message's time.
+        // The topic and purpose belong to the latest channel snapshot, so their
+        // mentions resolve as of now rather than any message's time.
         var topicTs = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
 
         // Batched instead of resolved per-message: collect every mentioned user
@@ -108,15 +139,23 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             .SelectMany(row => row.Text is not null
                 ? UserMentionRegex.Matches(row.Text).Select(m => (UserId: m.Groups[1].Value, Ts: row.Ts))
                 : [])
-            .Concat(channel.Topic is not null
-                ? UserMentionRegex.Matches(channel.Topic).Select(m => (UserId: m.Groups[1].Value, Ts: topicTs))
-                : [])
+            .Concat(new[] { channel.Topic, channel.Purpose }
+                .Where(text => text is not null)
+                .SelectMany(text => UserMentionRegex.Matches(text!).Select(m => (UserId: m.Groups[1].Value, Ts: topicTs))))
             .ToHashSet();
+        // Who created and archived the channel, as of when they did.
+        var creator = channel.CreatorId is not null ? (UserId: channel.CreatorId, Ts: channel.Created.ToString()) : ((string UserId, string Ts)?)null;
+        var archiver = archived?.UserId is not null ? (UserId: archived.UserId, Ts: archived.Ts) : ((string UserId, string Ts)?)null;
+        var channelPeople = new[] { creator, archiver }
+            .Where(person => person is not null)
+            .Select(person => person!.Value)
+            .ToArray();
         var mentionedUsers = messageRows
             .SelectMany(row => reactionsByMessageId[row.Id]
                 .SelectMany(reaction => reaction.Users ?? [])
                 .Select(userId => (UserId: userId, Ts: row.Ts)))
             .Concat(textMentions)
+            .Concat(channelPeople)
             .Distinct()
             .ToArray();
 
@@ -195,8 +234,9 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                 )
             )).ToDictionary(row => row.Id, row => row.FileId);
 
-        // Everyone shown with a profile popover: message authors and mentioned
-        // users, each as the profile version they're shown as.
+        // Everyone shown with a profile popover: message authors, mentioned
+        // users and the channel's creator and archiver, each as the profile
+        // version they're shown as.
         var users = messageRows
             .Where(row => row.AuthorId is not null && row.AuthorProfileId is not null)
             .Select(row => new GetChannelResponse.UserResponse
@@ -209,6 +249,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                 AvatarUrl = row.AuthorProfileAvatarFileId is not null ? $"{seaweedFs.PublicUrl}/{row.AuthorProfileAvatarFileId}" : null
             })
             .Concat(textMentions
+                .Concat(channelPeople)
                 .Where(userNames.ContainsKey)
                 .Select(mention => userNames[mention])
                 .Select(names => new GetChannelResponse.UserResponse
@@ -242,7 +283,21 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     Name = channel.Name,
                     Topic = channel.Topic is not null
                         ? ResolveMentions(ResolveEmoji(channel.Topic, emojiFileIds, seaweedFs.PublicUrl), topicTs, userNames, channelNames)
-                        : null
+                        : null,
+                    Purpose = channel.Purpose is not null
+                        ? ResolveMentions(ResolveEmoji(channel.Purpose, emojiFileIds, seaweedFs.PublicUrl), topicTs, userNames, channelNames)
+                        : null,
+                    // Slack keeps a group DM's own name when it's converted to a
+                    // channel, which was never a channel name.
+                    PreviousNames = [.. (channel.PreviousNamesJson is not null
+                            ? JsonSerializer.Deserialize<string[]>(channel.PreviousNamesJson) ?? []
+                            : [])
+                        .Where(name => !name.StartsWith("mpdm-"))],
+                    Created = TimestampFromTs(channel.Created.ToString()),
+                    CreatorProfileId = creator is not null && userNames.TryGetValue(creator.Value, out var creatorNames) ? creatorNames.ProfileId : null,
+                    IsArchived = channel.IsArchived,
+                    Archived = archived is not null ? TimestampFromTs(archived.Ts) : null,
+                    ArchiverProfileId = archiver is not null && userNames.TryGetValue(archiver.Value, out var archiverNames) ? archiverNames.ProfileId : null
                 },
                 Messages = messages,
                 Users = users
@@ -447,7 +502,7 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             AuthorId = row.AuthorId,
             AuthorProfileId = row.AuthorProfileId,
             AuthorAvatarUrl = row.AuthorAvatarFileId is not null ? $"{seaweedFsPublicUrl}/{row.AuthorAvatarFileId}" : null,
-            Timestamp = DateTimeOffset.FromUnixTimeSeconds(long.Parse(row.Ts.Split(".")[0])).ToString("o"),
+            Timestamp = TimestampFromTs(row.Ts),
             Files = [.. files],
             Reactions = [.. reactions.Select(reaction => new GetChannelResponse.ReactionResponse
             {
@@ -516,7 +571,13 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         ) avatar ON true
         """;
 
-    private record ChannelRow(string Id, string Name, string? Topic);
+    // A Slack ts (or unix time) as ISO 8601.
+    private static string TimestampFromTs(string ts) =>
+        DateTimeOffset.FromUnixTimeSeconds(long.Parse(ts.Split(".")[0])).ToString("o");
+
+    private record ChannelRow(string Id, string Name, string? Topic, string? Purpose, long Created, string? CreatorId, bool IsArchived, string? PreviousNamesJson);
+
+    private record ArchiveEventRow(string Subtype, string Ts, string? UserId);
 
     private record UserNamesRow(string Id, string Ts, int ProfileId, string DisplayName, string RealName, string? Title, string? ProfileAvatarFileId);
 

@@ -79,10 +79,23 @@ public class GetChannelResponse
         public required string Id { get; init; }
         public required string Name { get; init; }
         public string? Topic { get; init; }
+        // The channel's description.
+        public string? Purpose { get; init; }
+        public required string[] PreviousNames { get; init; }
+        public required string Created { get; init; }
+        // Keys the creator's profile (as of creation) in Users, null when we have none.
+        public int? CreatorProfileId { get; init; }
+        public required bool IsArchived { get; init; }
+        // When it was archived, null when unknown (Slack only records it as a
+        // message in the channel, which may be missing).
+        public string? Archived { get; init; }
+        // Keys the archiver's profile (as of archiving) in Users.
+        public int? ArchiverProfileId { get; init; }
     }
 
     public required ChannelResponse Channel { get; init; }
     public required MessageResponse[] Messages { get; init; }
-    // Message authors and users mentioned in text, by profile id.
+    // Message authors, users mentioned in text and the channel's creator and
+    // archiver, by profile id.
     public required Dictionary<int, UserResponse> Users { get; init; }
 }
