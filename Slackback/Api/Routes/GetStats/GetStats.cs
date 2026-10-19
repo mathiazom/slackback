@@ -21,8 +21,7 @@ public class GetStats(NpgsqlDataSource db) : EndpointWithoutRequest<GetStatsResp
                 """
                 SELECT
                     count(*) AS MessageCount,
-                    floor(min((data->>'ts')::numeric))::bigint AS FirstMessage,
-                    floor(max((data->>'ts')::numeric))::bigint AS LastMessage
+                    floor(min((data->>'ts')::numeric))::bigint AS FirstMessage
                 FROM message
                 """,
                 cancellationToken: ct
@@ -34,11 +33,10 @@ public class GetStats(NpgsqlDataSource db) : EndpointWithoutRequest<GetStatsResp
             {
                 MessageCount = stats.MessageCount,
                 FirstMessage = stats.FirstMessage is { } first ? DateTimeOffset.FromUnixTimeSeconds(first).ToString("o") : null,
-                LastMessage = stats.LastMessage is { } last ? DateTimeOffset.FromUnixTimeSeconds(last).ToString("o") : null,
             },
             cancellation: ct
         );
     }
 
-    private record StatsRow(long MessageCount, long? FirstMessage, long? LastMessage);
+    private record StatsRow(long MessageCount, long? FirstMessage);
 }

@@ -6,5 +6,4 @@ public class GetStatsResponse
     public required long MessageCount { get; init; }
     // Null when nothing is archived yet.
     public string? FirstMessage { get; init; }
-    public string? LastMessage { get; init; }
 }
