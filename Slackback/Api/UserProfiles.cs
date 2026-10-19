@@ -8,7 +8,7 @@ public static class UserProfiles
 {
     // What a profile shows, from a snapshot's data: the only fields a new version
     // starts on. Slack stores missing names and profile fields as "", which count
-    // as missing. The avatar is the archived 512px copy.
+    // as missing. The avatar is the archived copies, 72px and 512px.
     public static string FieldsSql(string dataSql) =>
         $"""
         jsonb_build_object(
@@ -26,6 +26,7 @@ public static class UserProfiles
             'is_ultra_restricted', COALESCE(({dataSql}->>'is_ultra_restricted')::boolean, false),
             'is_bot', COALESCE(({dataSql}->>'is_bot')::boolean, false),
             'deleted', COALESCE(({dataSql}->>'deleted')::boolean, false),
+            'avatar_72_id', {dataSql}->'profile'->>'archived_avatar_72_id',
             'avatar_512_id', {dataSql}->'profile'->>'archived_avatar_512_id'
         )
         """;

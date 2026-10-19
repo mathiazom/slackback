@@ -24,8 +24,9 @@ public class GetUserProfilesResponse
         public required bool IsBot { get; init; }
         // Deactivated.
         public required bool IsDeleted { get; init; }
-        // 512px.
+        // 72px and 512px.
         public string? AvatarUrl { get; init; }
+        public string? AvatarLargeUrl { get; init; }
         // When the profile changed to this in Slack, and away from it (null for
         // the current one).
         public required string Since { get; init; }

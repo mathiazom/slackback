@@ -43,7 +43,8 @@ public class GetUserProfiles(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : 
                     (fields->>'is_ultra_restricted')::boolean AS IsUltraRestricted,
                     (fields->>'is_bot')::boolean AS IsBot,
                     (fields->>'deleted')::boolean AS IsDeleted,
-                    fields->>'avatar_512_id' AS AvatarFileId,
+                    fields->>'avatar_72_id' AS AvatarFileId,
+                    fields->>'avatar_512_id' AS AvatarLargeFileId,
                     changed AS Since,
                     lead(changed) OVER (PARTITION BY public_id ORDER BY timestamp) AS Until
                 FROM (
@@ -80,6 +81,7 @@ public class GetUserProfiles(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : 
                     IsBot = row.IsBot,
                     IsDeleted = row.IsDeleted,
                     AvatarUrl = row.AvatarFileId is not null ? $"{seaweedFs.PublicUrl}/{row.AvatarFileId}" : null,
+                    AvatarLargeUrl = row.AvatarLargeFileId is not null ? $"{seaweedFs.PublicUrl}/{row.AvatarLargeFileId}" : null,
                     Since = DateTimeOffset.FromUnixTimeSeconds(row.Since).ToString("o"),
                     Until = row.Until is { } until ? DateTimeOffset.FromUnixTimeSeconds(until).ToString("o") : null
                 })]
@@ -88,5 +90,5 @@ public class GetUserProfiles(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : 
         );
     }
 
-    private record ProfileRow(string Id, int ProfileId, string? Name, string? DisplayName, string? RealName, string? Title, string? Pronouns, string? Email, string? Phone, bool IsPrimaryOwner, bool IsOwner, bool IsAdmin, bool IsRestricted, bool IsUltraRestricted, bool IsBot, bool IsDeleted, string? AvatarFileId, long Since, long? Until);
+    private record ProfileRow(string Id, int ProfileId, string? Name, string? DisplayName, string? RealName, string? Title, string? Pronouns, string? Email, string? Phone, bool IsPrimaryOwner, bool IsOwner, bool IsAdmin, bool IsRestricted, bool IsUltraRestricted, bool IsBot, bool IsDeleted, string? AvatarFileId, string? AvatarLargeFileId, long Since, long? Until);
 }
