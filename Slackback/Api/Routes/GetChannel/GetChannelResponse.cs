@@ -51,15 +51,27 @@ public class GetChannelResponse
         public required string AuthorRealName { get; init; }
         // Slack user id, null for bot/system messages.
         public string? AuthorId { get; init; }
-        // The author's user snapshot as of this message; null before their first
-        // snapshot. Lets slackopy tell when an author's identity changed.
-        public int? AuthorSnapshotId { get; init; }
+        // The author's profile version as of this message (the earliest one
+        // before that), null when we have none. Lets slackopy tell when an
+        // author's identity changed, and keys their profile in Users.
+        public int? AuthorProfileId { get; init; }
         public string? AuthorAvatarUrl { get; init; }
-        public string? AuthorAvatarLargeUrl { get; init; }
         public required string Timestamp { get; init; }
         public required FileResponse[] Files { get; init; }
         public required ReactionResponse[] Reactions { get; init; }
         public required MessageResponse[] Replies { get; init; }
+    }
+
+    public class UserResponse
+    {
+        public required string Id { get; init; }
+        public required int ProfileId { get; init; }
+        public required string DisplayName { get; init; }
+        public required string RealName { get; init; }
+        public string? Title { get; init; }
+        // The profile's own avatar (512px), which a message's avatar can lag
+        // behind or run ahead of (see UserAsOfSql).
+        public string? AvatarUrl { get; init; }
     }
 
     public class ChannelResponse
@@ -71,4 +83,6 @@ public class GetChannelResponse
 
     public required ChannelResponse Channel { get; init; }
     public required MessageResponse[] Messages { get; init; }
+    // Message authors and users mentioned in text, by profile id.
+    public required Dictionary<int, UserResponse> Users { get; init; }
 }

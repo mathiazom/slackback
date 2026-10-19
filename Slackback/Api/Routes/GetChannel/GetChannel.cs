@@ -52,11 +52,12 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     m.thread_ts AS ThreadTs,
                     m.data->>'text' AS Text,
                     m.data->>'user' AS AuthorId,
-                    u.snapshot_id AS AuthorSnapshotId,
+                    u.profile_id AS AuthorProfileId,
                     COALESCE(u.display_name, u.real_name, u.name, m.data->>'user') AS AuthorDisplayName,
                     COALESCE(u.real_name, u.name, m.data->>'user') AS AuthorRealName,
+                    u.title AS AuthorTitle,
                     u.avatar_72_id AS AuthorAvatarFileId,
-                    u.avatar_512_id AS AuthorAvatarLargeFileId,
+                    u.profile_avatar_512_id AS AuthorProfileAvatarFileId,
                     (m.data->'files')::text AS FilesJson,
                     (m.data->'reactions')::text AS ReactionsJson
                 FROM message m
@@ -101,13 +102,21 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         // rather than a lookup per mention occurrence. Users resolve as of the
         // message they appear in (reactors too - a reaction's own time isn't
         // known), so each (user, message ts) pair is its own lookup.
-        var mentionedUsers = messageRows
-            .SelectMany(row => (row.Text is not null ? UserMentionRegex.Matches(row.Text).Select(m => m.Groups[1].Value) : [])
-                .Concat(reactionsByMessageId[row.Id].SelectMany(reaction => reaction.Users ?? []))
-                .Select(userId => (UserId: userId, Ts: row.Ts)))
+        // Mentions in text are kept apart from reactors, since only they get a
+        // profile popover.
+        var textMentions = messageRows
+            .SelectMany(row => row.Text is not null
+                ? UserMentionRegex.Matches(row.Text).Select(m => (UserId: m.Groups[1].Value, Ts: row.Ts))
+                : [])
             .Concat(channel.Topic is not null
                 ? UserMentionRegex.Matches(channel.Topic).Select(m => (UserId: m.Groups[1].Value, Ts: topicTs))
                 : [])
+            .ToHashSet();
+        var mentionedUsers = messageRows
+            .SelectMany(row => reactionsByMessageId[row.Id]
+                .SelectMany(reaction => reaction.Users ?? [])
+                .Select(userId => (UserId: userId, Ts: row.Ts)))
+            .Concat(textMentions)
             .Distinct()
             .ToArray();
 
@@ -121,8 +130,11 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                     SELECT
                         r.user_id AS Id,
                         r.ts AS Ts,
+                        u.profile_id AS ProfileId,
                         COALESCE(u.display_name, u.real_name, u.name) AS DisplayName,
-                        COALESCE(u.real_name, u.name) AS RealName
+                        COALESCE(u.real_name, u.name) AS RealName,
+                        u.title AS Title,
+                        u.profile_avatar_512_id AS ProfileAvatarFileId
                     FROM unnest(@UserIds, @Tss) AS r(user_id, ts)
                     JOIN LATERAL (
                         {UserAsOfSql("r.user_id", "r.ts")}
@@ -183,6 +195,34 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                 )
             )).ToDictionary(row => row.Id, row => row.FileId);
 
+        // Everyone shown with a profile popover: message authors and mentioned
+        // users, each as the profile version they're shown as.
+        var users = messageRows
+            .Where(row => row.AuthorId is not null && row.AuthorProfileId is not null)
+            .Select(row => new GetChannelResponse.UserResponse
+            {
+                Id = row.AuthorId!,
+                ProfileId = row.AuthorProfileId!.Value,
+                DisplayName = row.AuthorDisplayName ?? row.AuthorId!,
+                RealName = row.AuthorRealName ?? row.AuthorId!,
+                Title = row.AuthorTitle,
+                AvatarUrl = row.AuthorProfileAvatarFileId is not null ? $"{seaweedFs.PublicUrl}/{row.AuthorProfileAvatarFileId}" : null
+            })
+            .Concat(textMentions
+                .Where(userNames.ContainsKey)
+                .Select(mention => userNames[mention])
+                .Select(names => new GetChannelResponse.UserResponse
+                {
+                    Id = names.Id,
+                    ProfileId = names.ProfileId,
+                    DisplayName = names.DisplayName,
+                    RealName = names.RealName,
+                    Title = names.Title,
+                    AvatarUrl = names.ProfileAvatarFileId is not null ? $"{seaweedFs.PublicUrl}/{names.ProfileAvatarFileId}" : null
+                }))
+            .DistinctBy(user => user.ProfileId)
+            .ToDictionary(user => user.ProfileId);
+
         var messages = messageRows
             .GroupBy(row => row.ThreadTs ?? row.Id)
             .Select(group =>
@@ -204,7 +244,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
                         ? ResolveMentions(ResolveEmoji(channel.Topic, emojiFileIds, seaweedFs.PublicUrl), topicTs, userNames, channelNames)
                         : null
                 },
-                Messages = messages
+                Messages = messages,
+                Users = users
             },
             cancellation: ct
         );
@@ -221,7 +262,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
 
     // Mentions stay in Slack's own <@id|name>/<#id|name> syntax, just with the
     // name filled in, so slackopy can style them - like emoji, slackback never
-    // emits HTML. @here/@channel/@everyone need no lookup and pass through as-is.
+    // emits HTML. A user we have a profile of becomes <@id:profileId|name>
+    // instead, pointing at it in the response's users. @here/@channel/@everyone need no lookup and pass through as-is.
     // A channel we haven't archived becomes plain "#name" text instead, since
     // slackopy links every <#id|name> and there'd be nothing to link to.
     // Runs after emoji resolution so a ":word:" inside a looked-up name can't be
@@ -233,8 +275,9 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             var inlineName = match.Groups[2].Success && match.Groups[2].Value != "" ? match.Groups[2].Value : null;
             var userId = match.Groups[1].Value;
             // Display name, so a mention reads the same as that user's messages.
-            var name = userNames.TryGetValue((userId, ts), out var resolved) ? EscapeSlackText(resolved.DisplayName) : inlineName ?? userId;
-            return $"<@{userId}|{name}>";
+            return userNames.TryGetValue((userId, ts), out var resolved)
+                ? $"<@{userId}:{resolved.ProfileId}|{EscapeSlackText(resolved.DisplayName)}>"
+                : $"<@{userId}|{inlineName ?? userId}>";
         });
 
         return ChannelMentionRegex.Replace(text, match =>
@@ -402,9 +445,8 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             AuthorDisplayName = row.AuthorDisplayName ?? "Unknown",
             AuthorRealName = row.AuthorRealName ?? "Unknown",
             AuthorId = row.AuthorId,
-            AuthorSnapshotId = row.AuthorSnapshotId,
+            AuthorProfileId = row.AuthorProfileId,
             AuthorAvatarUrl = row.AuthorAvatarFileId is not null ? $"{seaweedFsPublicUrl}/{row.AuthorAvatarFileId}" : null,
-            AuthorAvatarLargeUrl = row.AuthorAvatarLargeFileId is not null ? $"{seaweedFsPublicUrl}/{row.AuthorAvatarLargeFileId}" : null,
             Timestamp = DateTimeOffset.FromUnixTimeSeconds(long.Parse(row.Ts.Split(".")[0])).ToString("o"),
             Files = [.. files],
             Reactions = [.. reactions.Select(reaction => new GetChannelResponse.ReactionResponse
@@ -422,29 +464,31 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
         };
     }
 
-    // The user snapshot valid at a Slack ts (latest snapshot taken at or before it),
-    // for use inside a LATERAL join. Before a user's first snapshot (pre-archive
-    // history) names fall back to the earliest snapshot. snapshot_id is null in that
-    // case too, so "same identity" comparisons treat all pre-history alike.
+    // The user's profile version (see UserProfiles) at a Slack ts, from the latest
+    // snapshot taken at or before it, for use inside a LATERAL join. Before a
+    // user's first snapshot (pre-archive history) it falls back to the earliest
+    // snapshot, the closest record we have.
     // Snapshot timestamps are naive pack-time CURRENT_TIMESTAMPs, so the ts is
     // converted the same way (session time zone) before comparing.
     // The avatar resolves separately, from the latest snapshot whose avatar was
     // already current at the ts (slackpack's archived_avatar_since, usually earlier
     // than the snapshot itself), so it can change ahead of the names and reach into
     // pre-archive history. Before any of them it stays null, since we have no
-    // record of what they looked like then.
+    // record of what they looked like then. The profile's own avatar is there
+    // too, for its popover.
     private static string UserAsOfSql(string userIdSql, string tsSql) =>
         $"""
         SELECT
-            as_of.id AS snapshot_id,
-            COALESCE(as_of.data, earliest.data)->'profile'->>'display_name' AS display_name,
-            COALESCE(as_of.data, earliest.data)->>'real_name' AS real_name,
-            COALESCE(as_of.data, earliest.data)->>'name' AS name,
-            avatar.data->'profile'->>'archived_avatar_72_id' AS avatar_72_id,
-            avatar.data->'profile'->>'archived_avatar_512_id' AS avatar_512_id
+            snapshot.profile_id,
+            snapshot.fields->>'display_name' AS display_name,
+            snapshot.fields->>'real_name' AS real_name,
+            snapshot.fields->>'name' AS name,
+            snapshot.fields->>'title' AS title,
+            snapshot.fields->>'avatar_512_id' AS profile_avatar_512_id,
+            avatar.data->'profile'->>'archived_avatar_72_id' AS avatar_72_id
         FROM (SELECT 1) one
         LEFT JOIN LATERAL (
-            SELECT id, data
+            SELECT id
             FROM "user"
             WHERE public_id = {userIdSql}
               AND timestamp <= to_timestamp(({tsSql})::double precision)::timestamp
@@ -452,13 +496,16 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             LIMIT 1
         ) as_of ON true
         LEFT JOIN LATERAL (
-            SELECT data
+            SELECT id
             FROM "user"
             WHERE public_id = {userIdSql}
               AND as_of.id IS NULL
             ORDER BY timestamp ASC
             LIMIT 1
         ) earliest ON true
+        JOIN LATERAL (
+            {UserProfiles.SnapshotsSql($"public_id = {userIdSql}")}
+        ) snapshot ON snapshot.id = COALESCE(as_of.id, earliest.id)
         LEFT JOIN LATERAL (
             SELECT data
             FROM "user"
@@ -467,14 +514,13 @@ public class GetChannel(NpgsqlDataSource db, SeaweedFsOptions seaweedFs) : Endpo
             ORDER BY timestamp DESC
             LIMIT 1
         ) avatar ON true
-        WHERE as_of.id IS NOT NULL OR earliest.data IS NOT NULL
         """;
 
     private record ChannelRow(string Id, string Name, string? Topic);
 
-    private record UserNamesRow(string Id, string Ts, string DisplayName, string RealName);
+    private record UserNamesRow(string Id, string Ts, int ProfileId, string DisplayName, string RealName, string? Title, string? ProfileAvatarFileId);
 
-    private record MessageRow(string Id, string Ts, string? ThreadTs, string? Text, string? AuthorId, int? AuthorSnapshotId, string? AuthorDisplayName, string? AuthorRealName, string? AuthorAvatarFileId, string? AuthorAvatarLargeFileId, string? FilesJson, string? ReactionsJson);
+    private record MessageRow(string Id, string Ts, string? ThreadTs, string? Text, string? AuthorId, int? AuthorProfileId, string? AuthorDisplayName, string? AuthorRealName, string? AuthorTitle, string? AuthorAvatarFileId, string? AuthorProfileAvatarFileId, string? FilesJson, string? ReactionsJson);
 
     // Slack's own reaction shape. Count is authoritative: Slack can truncate the
     // users list on heavily-reacted messages.
