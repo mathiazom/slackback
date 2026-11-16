@@ -9,7 +9,7 @@
 
     <ItemGroup>
         <PackageReference Include="Dapper" Version="2.1.89" />
-        <PackageReference Include="FastEndpoints" Version="6.1.0" />
+        <PackageReference Include="FastEndpoints" Version="8.3.0" />
         <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="9.0.0" />
         <PackageReference Include="Microsoft.Extensions.DependencyInjection.Abstractions" Version="9.0.0" />
         <PackageReference Include="Npgsql.DependencyInjection" Version="10.0.3" />
