@@ -1,0 +1,46 @@
+name: CI
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Restores, builds and publishes with the SDK image from the Dockerfile,
+      # so the .NET version only lives there.
+      - name: Build image
+        run: docker build -t slackback:ci -f Slackback/Api/Dockerfile Slackback
+
+      # Catches runtime/SDK mismatches and startup crashes. No database is
+      # needed: connections are only opened per request.
+      - name: Smoke test
+        run: |
+          docker run -d --name slackback -p 8080:8080 \
+            -e ConnectionStrings__Postgres='Host=localhost;Database=ci' \
+            -e SeaweedFs__PublicUrl='http://localhost:8888' \
+            slackback:ci
+
+          for _ in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8080/ || true)
+            if [ "$code" != "000" ]; then
+              echo "API responded with HTTP $code"
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Running}}' slackback)" != "true" ]; then
+              echo "Container exited"
+              docker logs slackback
+              exit 1
+            fi
+            sleep 1
+          done
+
+          echo "API did not respond within 30s"
+          docker logs slackback
+          exit 1

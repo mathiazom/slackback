@@ -1,0 +1,52 @@
+version: 2
+
+# Weekly on Wednesdays at 06:00 Oslo time. Releases younger than 2 days are skipped.
+# Dependabot can't detect v0.x versions, so any v0.x dep must be excluded from
+# minor-and-patch by name (exclude-patterns). There are none at the moment.
+
+updates:
+  - package-ecosystem: nuget
+    directory: /Slackback
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "06:00"
+      timezone: Europe/Oslo
+    cooldown:
+      default-days: 2
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: docker
+    directory: /Slackback/Api
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "06:00"
+      timezone: Europe/Oslo
+    cooldown:
+      default-days: 2
+    groups:
+      # The SDK and runtime images must move together, majors included.
+      # A major bump also needs <TargetFramework> in Api.csproj bumped by hand.
+      dotnet-images:
+        patterns:
+          - "*dotnet/*"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: wednesday
+      time: "06:00"
+      timezone: Europe/Oslo
+    cooldown:
+      default-days: 2
+    groups:
+      minor-and-patch:
+        update-types:
+          - minor
+          - patch
